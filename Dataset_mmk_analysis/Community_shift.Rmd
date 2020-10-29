@@ -1,0 +1,186 @@
+---
+title: "Testing script"
+author: "Jianqiu Zheng"
+date: "4/27/2020"
+output: html_document
+---
+
+```{r library}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(ggpubr)
+library(scales)
+library(MASS)
+
+```
+## Create a test dataset with RS gradient
+```{r dataset}
+rs<-seq(0.1,0.9,0.01)
+po<-0.6
+mvol<-po*rs
+bd<-(1-po)*2.65
+soc<-1e-7 #0.05/12*bd*1e-3 #mol/cm3
+oxy<-1e-7 # po*0.21*1.3e-6 #mol/cm3
+theta<-mvol/0.8#thaR=0,thaS=0.7
+t1<-theta^(-1/0.33)-1#n=1.5, alpha=0.03, m=0.33
+t2<-t1^(1/1.5)/0.03
+data<-data.frame(rs=rs)
+data$mvol<-mvol
+data$po<-po
+data$bd<-bd
+data$mp<-t2
+data$clay<-0.25
+data$soc<-soc
+data$oxy<-oxy
+
+summary(data)
+```
+##calculate mass transfer coefficients
+```{r mass transfer}
+fh<-function(mvol,po,bd){
+  Ds0=1.4e-9  #aqueous tracer diffusivity at 25 (m2/s)
+  Dg0=2.1e-5 #oxygen diffusivity in gas
+  fDg<-(po)^1.5*((po-mvol)/(po))^2.5 #gas phase relative diffusivity
+  fDs<-(po)^1.5*((mvol)/(po))^2.5 #aqueous phase relative diffusivity
+  H_o2<-1.3e-6  #mol/cm3/atm
+  hs<-6/(mvol+bd*10)*Ds0*fDs/(0.00002^2) #DOM delivery (mass transfer rate in d-1)
+  hg<-6/(mvol+bd*1)*Dg0*fDg*H_o2/(0.00002^2)  #DO delivery (mass transfer rate)
+  return (list(fDs,fDg, hs, hg))}
+
+fhout<-fh(mvol, po, bd)
+hs<-fhout[[3]]
+hg<-fhout[[4]]
+
+mtdata<-data.frame(rs=data$rs)
+mtdata$Hsolute<-hs
+mtdata$Hgas<-hg
+ptest<-reshape2::melt(mtdata, id.vars=("rs"))
+
+
+
+base_breaks <- function(n = 10){
+    function(x) {
+        axisTicks(log10(range(x, na.rm = TRUE)), log = TRUE, n = n)
+    }
+}
+
+plot1<-ggplot(ptest, aes(x = rs,y=value, color=variable)) + 
+  scale_x_continuous(name = "Relative saturation",limits = c(0,1)) +
+  scale_y_continuous(name = "Relative diffusivity",trans = log_trans(), breaks = base_breaks(),limits = c(1e-5,1))+
+  geom_line(aes(color=variable,linetype=variable), size=1)+
+  scale_color_manual(values = c("#b2abd2","#2d004b"))+
+  scale_linetype_manual(values=c("solid","solid"))
+
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+pdf("Rdiff_test.pdf", width=4.4, height=3)
+plot2
+dev.off()
+
+
+```
+## Community shift from drought-tolerant to drought-sensitive species
+
+```{r pressure, echo=FALSE}
+Comm<-function (hs,hg, soc, oxy, kmc, kmg, vmax,n){
+  fm1<-exp(-0.00001*data$mp)  # droupht-tolerant (low moisture sensitivty)
+  fm2<-exp(-0.002*data$mp)    # droupht-sensitive (high moisture sensitivty)
+  ac<-kmc/soc
+  bc<-vmax/(hs*soc)
+  t1c<-(1-4*bc/(1+ac+bc)^2)^0.5
+  F1c<-(1+ac+bc)/2/bc*(1-t1c)#uptake flux
+  css<-F1c*kmc/(1-F1c)
+  ag<-kmg/oxy
+  bg<-vmax/(hg*oxy)
+  t1g<-(1-4*bg/(1+ag+bg)^2)^0.5
+  F1g<-(1+ag+bg)/2/bg*(1-t1g)
+  oss<-F1g*kmg/(1-F1g)
+  Ft<-F1c*F1g
+  Ftt<-(fm1*n+fm2*(1-n))*F1c*F1g
+  return(list(Ft, Ftt))
+}
+
+out1<-Comm(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.2) #n=drought-tolerant/total
+out2<-Comm(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.4)
+out3<-Comm(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.6)
+out4<-Comm(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.8)
+out5<-Comm(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,1)
+
+#====plotting
+sdata<-data.frame(rs=rs)
+sdata$rt1<-out1[[2]]/max(out1[[2]])
+sdata$rt2<-out2[[2]]/max(out2[[2]])
+sdata$rt3<-out3[[2]]/max(out3[[2]])
+sdata$rt4<-out4[[2]]/max(out4[[2]])
+sdata$rt5<-out5[[2]]/max(out5[[2]])
+sdata$ref<-out1[[1]]/max(out1[[1]])
+ptest<-reshape2::melt(sdata, id.vars=("rs"))
+
+plot1<-ggplot(ptest, aes(x = rs,y=value, color=variable)) + 
+  scale_x_continuous(name = "Relative saturation",limits = c(0,1)) +
+  scale_y_continuous(name = "Relative activity",limits=c(0,1))+#,trans = log_trans(), breaks = base_breaks())+
+  geom_line(aes(color=variable,linetype=variable), size=1)+
+  scale_color_manual(values = c("#d8daeb","#b2abd2","#8073ac","#542788","#2d004b","#e08214"))+
+  scale_linetype_manual(values=c("solid","solid","solid","solid","solid","dashed"))
+
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+pdf("drought_shift.pdf", width=4.4, height=3)
+plot2
+dev.off()
+```
+
+## Community shift from aerobic pathway dominant to anaerobic pathway dominant (by changing the reaction stoichiometry)
+
+```{r stoich}
+Stoi<-function (hs,hg, soc, oxy, kmc, kmg, vmax,m){
+  fm1<-exp(-0.0002*data$mp)
+  ac<-kmc/soc
+  bc<-vmax/(hs*soc)
+  t1c<-(1-4*bc/(1+ac+bc)^2)^0.5
+  F1c<-(1+ac+bc)/2/bc*(1-t1c)#uptake flux
+  css<-F1c*kmc/(1-F1c)
+  ag<-kmg/oxy
+  bg<-vmax/(hg*oxy)
+  t1g<-(1-4*bg/(1+ag+bg)^2)^0.5
+  F1g<-(1+ag+bg)/2/bg*(1-t1g)
+  oss<-F1g*kmg/(1-F1g)
+  Ft<-fm1*F1c*F1g
+  Ftt<-fm1*F1c*F1g^m
+  return(list(Ft, Ftt))
+}
+
+
+out1<-Stoi(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.2) #n=reaction stoichiometric ratio between Oxygen and organic carbon
+out2<-Stoi(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.4)
+out3<-Stoi(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.6)
+out4<-Stoi(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,0.8)
+out5<-Stoi(hs,hg, soc,oxy,1e-5,1e-5,1.16e-7,1)
+
+#====plotting against reference run
+sdata<-data.frame(rs=rs)
+sdata$stoi1<-out1[[2]]/max(out1[[2]])
+sdata$stoi2<-out2[[2]]/max(out2[[2]])
+sdata$stoi3<-out3[[2]]/max(out3[[2]])
+sdata$stoi4<-out4[[2]]/max(out4[[2]])
+sdata$stoi5<-out5[[2]]/max(out5[[2]])
+sdata$stoi0<-out1[[1]]/max(out1[[1]])
+ptest<-reshape2::melt(sdata, id.vars=("rs"))
+
+plot1<-ggplot(ptest, aes(x = rs,y=value, color=variable)) + 
+  scale_x_continuous(name = "Relative saturation",limits = c(0,1)) +
+  scale_y_continuous(name = "Relative activity",limits=c(0,1))+#,trans = log_trans(), breaks = base_breaks())+
+  geom_line(aes(color=variable,linetype=variable), size=1)+
+  scale_color_manual(values = c("#fee0b6","#fdb863","#e08214","#b35806","#7f3b08","#542788"))+
+  scale_linetype_manual(values=c("solid","solid","solid","solid","solid","dashed"))
+
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+pdf("stoich_shift.pdf", width=4.4, height=3)
+plot2
+dev.off()
+```
