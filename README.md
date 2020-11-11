@@ -8,5 +8,5 @@ This folder contains the R script used fordiffusion based nonliear kinetics anal
 
 2. Folder--Dataset_mmk_analysis
 
-This folder contains the compiled dataset from published incubation studies (dataset.csv), soil properties, moisture conditions and relative microbial respiration rates were summarized in the file. The resulting dataset consisted of data from 63 different soils, with associated moisture-respiration relationships. 
-An R markdown file is provide with descriptions on the analysis and graph generation.
+This folder contains a compiled dataset from published incubation studies (dataset.csv). The dataset contains measurements from 63 different soils. 
+An R markdown file is provided with descriptions on the analysis and graph generation.
