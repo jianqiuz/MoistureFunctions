@@ -4,8 +4,9 @@ This repository is archived for manuscript " a trait-based approach to address p
 
 1. Folder--Diffusion_nonlinear_analysis
 
-This folder contains the R script used to generate diffusion based nonliear kinetics analysis and all graph components
+This folder contains the R script used fordiffusion based nonliear kinetics analysis within a model system. Sensitivity analysis and graph generation are also included.
 
 2. Folder--Dataset_mmk_analysis
 
-This folder contains the compiled dataset from published incubation studies, the R script used for analysis and graph generation
+This folder contains the compiled dataset from published incubation studies (dataset.csv), soil properties, moisture conditions and relative microbial respiration rates were summarized in the file. The resulting dataset consisted of data from 63 different soils, with associated moisture-respiration relationships. 
+An R markdown file is provide with descriptions on the analysis and graph generation.
