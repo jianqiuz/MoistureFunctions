@@ -8,5 +8,5 @@ This repository is archived for manuscript **" a trait-based approach to address
 
 1. Folder--Dataset_mmk_analysis
 
-   1. This folder contains a compiled dataset from published incubation studies (dataset.csv). The dataset contains measurements from 63 different soils. 
+   1. This folder contains a compiled dataset from published incubation studies (*dataset.csv*). The dataset contains measurements from 63 different soils. 
 An R markdown file is provided with descriptions on the analysis and graph generation.
