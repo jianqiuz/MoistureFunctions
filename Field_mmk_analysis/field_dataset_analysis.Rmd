@@ -1,0 +1,1056 @@
+---
+title: "field_dataset_analysis"
+author: "Jianqiu Zheng"
+date: "11/28/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## dataset prep
+This section of code extract unique soil samples into a new dataframe <rate> 
+
+```{r dataset}
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(ggpubr)
+library(GGally)
+library(scales)
+library(MASS)
+
+
+# Create a transparent theme object
+transparent_theme <- theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  axis.text.x = element_blank(), 
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank(),
+  panel.grid = element_blank(),
+  axis.line = element_blank(),
+  panel.background = element_rect(fill = "transparent",colour = NA),
+  plot.background = element_rect(fill = "transparent",colour = NA))
+
+
+
+fdata <- read.csv(file = 'field_dataset.csv') # dataset use a dummy colomn to scale all ra measurements
+
+
+#==data fitting
+library(minpack.lm)
+x<-fdata$rs
+y<-fdata$ra
+dat<-data.frame(x=x)
+dat$y<-y
+
+
+curve.nls = nlsLM(y ~ a*x^2+b*x,
+                     start=list(a=-3,
+                                b=3),
+                     data = dat)
+coef(curve.nls)
+summary(curve.nls)
+
+
+#plot observations along clay and soc gradient
+plot1<-ggplot(fdata, aes(x = rs,y = ra, group = id)) +
+  scale_x_continuous(name = expression(paste("Relative saturation")),limits = c(0,1)) +
+  scale_y_continuous(name = 'Relative activity ',limits = c(0,1)) +
+  geom_point(aes(color=clay),size=1.6, shape=1,stroke=1)+theme_bw()+
+  scale_color_gradientn(colors=c("#b35806", "#fee0b6", "#542788"), values=c(0,1))+theme(text = element_text(size=16)) 
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))#co
+plot2
+
+rs<-seq(0,1,0.05)
+femp<-(1.98*rs-1.51*rs^2)/0.65#/0.644  #max=0.644  (3.07RS-2.36RS^2)
+emp<-data.frame(rs=rs)
+emp$res<-femp  #relative activity
+
+bp<-ggplot(emp, aes(x = rs,y = femp)) +geom_line(color="black",size=1,shape=1,stroke=1)+transparent_theme
+bp_grob<-ggplotGrob(bp)#create the external graphcal elements (called a grop in Grid terminology)
+ymin<-0
+xmin<-0
+plot7<-plot2+annotation_custom(grob=bp_grob, xmin =xmin+0.1, xmax=xmin+1, ymin=ymin, ymax=ymin+0.75)
+print(plot7)
+
+pdf("field_obv_clay.pdf", width=5.5, height=4)
+plot7
+dev.off() 
+
+```
+#==subsetting unique sample ====
+```{r unique}
+rate<-dplyr::select(filter(fdata,ra==1), c(id, rs, mvol, mp, bd, porosity, clay, org))
+
+#===calculating accessible soc and oxy at optimum moisture condition (when ra==1)
+opt<-function(po,mvol,bd,org){
+  soc<-org/12*bd*1e-3  #assum ss 1% as DOC  (mol/cm3) and 10% of these DOC are accessible
+  oxy<-(po-mvol)*0.21*1.3e-6  #(mol/cm3)Henry's law constant (Caq/p=1.3e-3 mol/L/atm)   
+  return (list(soc, oxy))}
+po<-rate$porosity
+mvol<-rate$mvol
+org<-rate$org
+bd<-rate$bd
+ss_opt<-opt(po,mvol,bd,org)
+rate$soc_ss<-ss_opt[[1]] ##approximately 100mol/cm3
+rate$oxy_ss<-ss_opt[[2]]
+rate$mp_fc<-rate$mp
+summary(rate)
+```
+
+## Effective Km calculation
+This section prepares parameters for effective Km calculations (based on Tang et al. 2019) 
+```{r Kaeff}
+Npsite=3000 # number of transporter per cell
+k2_p=100  #transporter specific substrate uptake rate, unit:s-1
+rc=1.e-6 #microbial cell radius unit:m
+rp=1.e-9  #transporter radius unit:m
+Na=6.e23  #Avogadro number
+Ratm=50 #atmospheric resistance, 50 s/m
+
+temp=25+273.15#define temperature
+
+#=calculating gaseous and aqueous tortuosity (Original paper based on Morldrup, 2003)
+tau<-function (mvol, po, clay){
+  wpo<-mvol  #water filled porosity
+  gpo<-po-mvol #gas filled porosity
+  b<-2.91+0.195*clay #shape parameter 
+  taug<- (po-mvol)*((po-mvol)/po)^3/b
+  tauw<- mvol*(mvol/po)^(3/b-1)
+  return (list(wpo=wpo, gpo=gpo,taug=taug,tauw=tauw))
+}
+mvol<-rate$mvol
+po<-rate$porosity
+clay<-rate$clay
+tortuo<-tau(mvol, po,clay)
+
+#==calculating O2 and C substrate diffusivity
+Diffu<-function (gpo, wpo, taug, tauw){
+  Dw_o2=1.4e-9*temp/298.0  #aqueous tracer diffusivity at 25
+  Dg_o2=1.8e-5*(temp/273.0)**1.82 #oxygen diffusivity in gas phase
+  henry_o2=3.2e-2*exp(-1500.*(1/temp-1/298.15))
+  Dwo2= 0.5*(Dg_o2*taug*gpo*henry_o2+Dw_o2*tauw*wpo) #bulk aqueous molecular diffusivity as a colume weighted average between aquesous and gaseous phases
+  Dw_s=6e-9 #oxygen diffusivity in water
+  Dws=Dw_s*tauw*wpo#bulk substrate diffusivity (between the soil matrix and microsite)
+  return(list(Dwo2=Dwo2, Dws=Dws))
+}
+
+gpo<-tortuo$gpo
+wpo<-tortuo$wpo
+taug<-tortuo$taug
+tauw<-tortuo$tauw
+Dw<-Diffu(gpo, wpo, taug, tauw)
+
+#==calculating effective microbial substrate affinity for OC and O2 (Tang et al 2019)========
+Kaff<-function(Ncell, gpo, wpo, taug, tauw, Dws,Dwg,mp){
+  Bdens<-Ncell/Na #free microsite microbial abundance mol/m3
+  Rm<-rc*(40*Ncell)^(1/3)  #microsite radius
+  vm<-pi*4/3*Rm^3  #microsite volume 
+  kw2<-k2_p*Npsite #(Npsite*rp+pi*rc) #cell specific uptake rate for OX, unit s-1
+  Dw_s0 = 6e-9  #for claculating reference affinity
+  Dw_g0 = 1.4e-9
+  fin<-Npsite*rp/ (Npsite*rp+pi*rc)#interception probability (number of molecules that 1 mol cell will encounter and be able to intercept)
+  ksw1<-4*pi*Dw_s0*rc*fin*Na   #substrate delivery parameter unit m3 mo-1 s-1
+  kow1<-4*pi*Dw_g0*rc*fin*Na
+  ksw0<-kw2/ksw1#reference affinity (Km used in MM kinetics in a well-mixed solution)
+  kow0<-kw2/kow1#reference affinity (Km used in MM kinetics in a well-mixed solution)
+  film<-exp(-13.65-0.857*log(mp/1000))    #calculting water film thickness
+  ks_con<- (film/(Rm*Dw_s0*(Rm+film)) + 1/(Dws*(Rm+film)))*vm/(4*pi)#conductance coefficient
+  ks_aff<-ksw0*(1+ks_con*ksw1*Ncell/Na/vm)
+  ko_con<- (film/(Rm*Dw_g0*(Rm+film)) + 1/(Dwg*(Rm+film)))*vm/(4*pi)#conductance coefficient
+  ko_aff<-kow0*(1+ko_con*kow1*Ncell/Na/vm)
+  return(list(ksw0=ksw0, kow0=kow0,KaffOC=ks_aff, Kaffoxy=ko_aff))
+}
+
+mp<-rate$mp
+Dws<-Dw$Dws
+Dwg<-Dw$Dwo2
+Ncell<-2.68e-10*rate$soc_ss*1e-6*6.02e23 
+test<-Kaff(Ncell, gpo, wpo, taug, tauw, Dws,Dwg,mp)
+
+rate$Keffs<-test$KaffOC*1e-3
+rate$Keffo<-test$Kaffoxy*1e-3
+
+
+kmdata<-data.frame(rs=rate$rs)
+kmdata$kms_eff<-rate$Keffs
+kmdata$kmo_eff<-rate$Keffo
+ptest<-reshape2::melt(kmdata, id.vars=("rs"))
+
+base_breaks <- function(n = 10){
+    function(x) {
+        axisTicks(log10(range(x, na.rm = TRUE)), log = TRUE, n = n)
+    }
+}
+
+plot1<-ggplot(ptest, aes(x = rs,y=value, color=variable)) + 
+  scale_x_continuous(name = "Relative saturation",limits = c(0,1)) +
+  scale_y_continuous(name = "Effective substrate affinity",trans = log_trans(), breaks = base_breaks(),limits = c(1e-8,1e-5))+
+  geom_point(aes(color=variable,linetype=variable), size=1)+
+  scale_color_manual(values = c("#b2abd2","#2d004b"))+
+  scale_linetype_manual(values=c("solid","solid"))
+
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+pdf("effective_km.pdf", width=5.5, height=4)
+plot2
+dev.off() 
+```
+
+## new dataframe for simulations
+This section put the calculated accessible soc/oxy and effective affinity parameter Keffs/Keffo back to the orginal data frame.
+
+```{r newdata}
+userate<-dplyr::select(rate, c(id, mp_fc,soc_ss, oxy_ss,Keffs, Keffo))
+usesoil<-dplyr::select(fdata, c(id,rs,ra, mvol, mp,  bd, porosity, clay, org, mp_th))
+newdata<-merge(usesoil, userate, by="id")
+summary(newdata)
+```
+##Diffusion based moisture-respiration relationship
+This section calculates mass transfer coefficients and analytical solution of diffusion-limited Michaelis-Menten microbial uptake kinetics
+```{r diff-mmk}
+#==========Diffusion based moisture-respiration relationship 
+fh<-function(mvol,po,bd){
+  Ds0=1.4e-9 #aqueous tracer diffusivity at 25 (m2/s)
+  Dg0=2.1e-5 #oxygen diffusivity in gas
+  fDg<-((po-mvol)/(po))^0.5 #gas phase relative diffusivity
+  fDs<-((mvol)/(po))^0.5 #aqueous phase relative diffusivity
+  H_o2<-1.3e-6  #mol/cm3/atm
+  hs<-6/(mvol+bd*10)*Ds0*fDs/(0.00002^2) #DOM delivery (mass transfer rate in d-1)
+  hg<-6/(mvol+bd*1)*Dg0*fDg*H_o2/(0.00002^2)  #DO delivery (mass transfer rate)
+  return (list(fDs,fDg, hs, hg))}
+mvol<-newdata$mvol
+po<-newdata$porosity
+bd<-newdata$bd
+fhout<-fh(mvol, po, bd)
+hs<-fhout[[3]]
+hg<-fhout[[4]]
+
+DiffMM<-function (hs,hg, soc, oxy, kmc, kmg,vmax){
+  fm<-1-(log(newdata$mp/newdata$mp_fc)/log(newdata$mp_th/newdata$mp_fc))^1 #newdata$rs^(1/2.2) #microbial hydrological sensitivity
+  ac<-kmc/(soc)
+  bc<-vmax/hs/(soc)
+  t1c<-(1-4*bc/(1+ac+bc)^2)^0.5
+  F1c<-(1+ac+bc)/2/bc*(1-t1c)
+  css<-F1c*kmc/(1-F1c)
+  ag<-kmg/(oxy)
+  bg<-vmax/hg/(oxy)
+  t1g<-(1-4*bg/(1+ag+bg)^2)^0.5
+  F1g<-(1+ag+bg)/2/bg*(1-t1g)
+  oss<-F1g*kmg/(1-F1g)
+  Ft<-fm*F1c*F1g*10^8
+  rc<-ac/bc*ag/bg
+  tc<-css/soc
+  return(list(Ft,rc,tc))
+}
+
+
+soc<-newdata$soc_ss
+oxy<-newdata$oxy_ss
+kmo<-newdata$Keffo
+kms<-newdata$Keffs
+
+out1<-DiffMM(hs,hg, soc,oxy,1e-6,1e-6,1e-6) #Km_ref #1e-7,1e-7,2.5e-6, 1e-6,1e-6,5e-6
+out2<-DiffMM(hs,hg, soc,oxy,kms,kmo,5e-6) #Km_eff
+newdata$out1<-1.82*newdata$rs-1.14*newdata$rs^2#empirical (3.07RS-2.36RS^2) 1.98*rs-1.52*rs^2
+newdata$out2<-1-(log(newdata$mp/newdata$mp_fc)/log(newdata$mp_th/newdata$mp_fc))^1#exp(-0.00021*newdata$mp)  #physiological  {1-(log(po/33)/log(15800/33))^2}
+newdata$out3<-(1-(log(newdata$mp/newdata$mp_fc)/log(newdata$mp_th/newdata$mp_fc))^1) *fhout[[1]]*fhout[[2]]*soc*oxy #linear
+newdata$out4<-out1[[1]]#km
+newdata$out5<-out2[[1]]#variable km
+summary(newdata)
+
+```
+
+
+
+
+
+
+```{r abtest}
+ptest<-data.frame(rs=newdata$rs) 
+ptest$rc<-out1[[2]]
+
+
+#residual plot
+plot1<-ggplot(ptest, aes(x = rs,y = rc)) +
+  scale_x_continuous(name = expression(paste("Relative saturation")),limits = c(0,1)) +
+  scale_y_continuous(name = 'a/b ratio')+geom_point(col="#642ba6", pch=1 , cex=1.6)+
+  theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot1)
+pdf("incu_abratio.pdf", width=5.5, height=4)
+plot2
+dev.off() 
+
+```
+
+## Rescale simulations
+Rescale simulation results to 0-1 scale (because vmaxs are not optimized to ra measurements)
+
+```{r rescale}
+
+mpdata<-newdata
+colnames(mpdata)[16]<-("pred_new")
+mpdata$scaled_new<-0
+
+#check unique id======
+unique(mpdata$id)
+
+id_1<-subset(mpdata, id=="Bare")
+id_1$scaled_new<-id_1$pred_new/max(id_1$pred_new)
+
+id_2<-subset(mpdata, id=="Cedao")
+id_2$scaled_new<-id_2$pred_new/max(id_2$pred_new)
+
+id_3<-subset(mpdata, id=="Cedo")
+id_3$scaled_new<-id_3$pred_new/max(id_3$pred_new)
+
+id_4<-subset(mpdata, id=="droughtCK")
+id_4$scaled_new<-id_4$pred_new/max(id_4$pred_new)
+
+id_5<-subset(mpdata, id=="droughtPE3")
+id_5$scaled_new<-id_5$pred_new/max(id_5$pred_new)
+
+id_6<-subset(mpdata, id=="droughtPE5")
+id_6$scaled_new<-id_6$pred_new/max(id_6$pred_new)
+
+id_7<-subset(mpdata, id=="droughtPE7")
+id_7$scaled_new<-id_7$pred_new/max(id_7$pred_new)
+
+id_8<-subset(mpdata, id=="Fog1")
+id_8$scaled_new<-id_8$pred_new/max(id_8$pred_new)
+
+id_9<-subset(mpdata, id=="Fog2")
+id_9$scaled_new<-id_9$pred_new/max(id_9$pred_new)
+
+id_10<-subset(mpdata, id=="GE")
+id_10$scaled_new<-id_10$pred_new/max(id_10$pred_new)
+
+id_11<-subset(mpdata, id=="GiganteAd")
+id_11$scaled_new<-id_11$pred_new/max(id_11$pred_new)
+
+id_12<-subset(mpdata, id=="GiganteCT")
+id_12$scaled_new<-id_12$pred_new/max(id_12$pred_new)
+
+id_13<-subset(mpdata, id=="GiganteRe")
+id_13$scaled_new<-id_13$pred_new/max(id_13$pred_new)
+
+id_14<-subset(mpdata, id=="HC")
+id_14$scaled_new<-id_14$pred_new/max(id_14$pred_new)
+
+id_15<-subset(mpdata, id=="LC")
+id_15$scaled_new<-id_15$pred_new/max(id_15$pred_new)
+
+id_16<-subset(mpdata, id=="MC")
+id_16$scaled_new<-id_16$pred_new/max(id_16$pred_new)
+
+id_17<-subset(mpdata, id=="mix")
+id_17$scaled_new<-id_17$pred_new/max(id_17$pred_new)
+
+id_18<-subset(mpdata, id=="OakOA")
+id_18$scaled_new<-id_18$pred_new/max(id_18$pred_new)
+
+id_19<-subset(mpdata, id=="OakUT")
+id_19$scaled_new<-id_19$pred_new/max(id_19$pred_new)
+
+id_20<-subset(mpdata, id=="open")
+id_20$scaled_new<-id_20$pred_new/max(id_20$pred_new)
+
+id_21<-subset(mpdata, id=="Pineforest")
+id_21$scaled_new<-id_21$pred_new/max(id_21$pred_new)
+
+id_22<-subset(mpdata, id=="Rain1")
+id_22$scaled_new<-id_22$pred_new/max(id_22$pred_new)
+
+id_23<-subset(mpdata, id=="Rain2")
+id_23$scaled_new<-id_23$pred_new/max(id_23$pred_new)
+
+id_24<-subset(mpdata, id=="Range")
+id_24$scaled_new<-id_24$pred_new/max(id_24$pred_new)
+
+id_25<-subset(mpdata, id=="RR")
+id_25$scaled_new<-id_25$pred_new/max(id_25$pred_new)
+
+id_26<-subset(mpdata, id=="RS")
+id_26$scaled_new<-id_26$pred_new/max(id_26$pred_new)
+
+id_27<-subset(mpdata, id=="ST")
+id_27$scaled_new<-id_27$pred_new/max(id_27$pred_new)
+
+id_28<-subset(mpdata, id=="Teak")
+id_28$scaled_new<-id_28$pred_new/max(id_28$pred_new)
+
+id_29<-subset(mpdata, id=="TibetCK")
+id_29$scaled_new<-id_29$pred_new/max(id_29$pred_new)
+
+id_30<-subset(mpdata, id=="TibetW1")
+id_30$scaled_new<-id_30$pred_new/max(id_30$pred_new)
+
+id_31<-subset(mpdata, id=="TibetW2")
+id_31$scaled_new<-id_31$pred_new/max(id_31$pred_new)
+
+id_32<-subset(mpdata, id=="under")
+id_32$scaled_new<-id_32$pred_new/max(id_32$pred_new)
+
+id_33<-subset(mpdata, id=="WythamAd")
+id_33$scaled_new<-id_33$pred_new/max(id_33$pred_new)
+
+id_34<-subset(mpdata, id=="WythamCT")
+id_34$scaled_new<-id_34$pred_new/max(id_34$pred_new)
+
+id_35<-subset(mpdata, id=="WythamRe")
+id_35$scaled_new<-id_35$pred_new/max(id_35$pred_new)
+
+id_36<-subset(mpdata, id=="YL")
+id_36$scaled_new<-id_36$pred_new/max(id_36$pred_new)
+
+
+new_scaled<-rbind(id_1,id_2,id_3,id_4,id_5,id_6,id_7,id_8,id_9,id_10,id_11,id_12,id_13,id_14,id_15,id_16,id_17,id_18,id_19,id_20,
+                  id_21,id_22,id_23,id_24,id_25,id_26,id_27,id_28,id_29,id_30,id_31,id_32,id_33,id_34,id_35,id_36)
+#=====
+newdata$out1_s<-new_scaled$scaled_new
+
+mpdata<-newdata
+colnames(mpdata)[17]<-("pred_new")
+mpdata$scaled_new<-0
+
+#check unique id======
+unique(mpdata$id)
+
+id_1<-subset(mpdata, id=="Bare")
+id_1$scaled_new<-id_1$pred_new/max(id_1$pred_new)
+
+id_2<-subset(mpdata, id=="Cedao")
+id_2$scaled_new<-id_2$pred_new/max(id_2$pred_new)
+
+id_3<-subset(mpdata, id=="Cedo")
+id_3$scaled_new<-id_3$pred_new/max(id_3$pred_new)
+
+id_4<-subset(mpdata, id=="droughtCK")
+id_4$scaled_new<-id_4$pred_new/max(id_4$pred_new)
+
+id_5<-subset(mpdata, id=="droughtPE3")
+id_5$scaled_new<-id_5$pred_new/max(id_5$pred_new)
+
+id_6<-subset(mpdata, id=="droughtPE5")
+id_6$scaled_new<-id_6$pred_new/max(id_6$pred_new)
+
+id_7<-subset(mpdata, id=="droughtPE7")
+id_7$scaled_new<-id_7$pred_new/max(id_7$pred_new)
+
+id_8<-subset(mpdata, id=="Fog1")
+id_8$scaled_new<-id_8$pred_new/max(id_8$pred_new)
+
+id_9<-subset(mpdata, id=="Fog2")
+id_9$scaled_new<-id_9$pred_new/max(id_9$pred_new)
+
+id_10<-subset(mpdata, id=="GE")
+id_10$scaled_new<-id_10$pred_new/max(id_10$pred_new)
+
+id_11<-subset(mpdata, id=="GiganteAd")
+id_11$scaled_new<-id_11$pred_new/max(id_11$pred_new)
+
+id_12<-subset(mpdata, id=="GiganteCT")
+id_12$scaled_new<-id_12$pred_new/max(id_12$pred_new)
+
+id_13<-subset(mpdata, id=="GiganteRe")
+id_13$scaled_new<-id_13$pred_new/max(id_13$pred_new)
+
+id_14<-subset(mpdata, id=="HC")
+id_14$scaled_new<-id_14$pred_new/max(id_14$pred_new)
+
+id_15<-subset(mpdata, id=="LC")
+id_15$scaled_new<-id_15$pred_new/max(id_15$pred_new)
+
+id_16<-subset(mpdata, id=="MC")
+id_16$scaled_new<-id_16$pred_new/max(id_16$pred_new)
+
+id_17<-subset(mpdata, id=="mix")
+id_17$scaled_new<-id_17$pred_new/max(id_17$pred_new)
+
+id_18<-subset(mpdata, id=="OakOA")
+id_18$scaled_new<-id_18$pred_new/max(id_18$pred_new)
+
+id_19<-subset(mpdata, id=="OakUT")
+id_19$scaled_new<-id_19$pred_new/max(id_19$pred_new)
+
+id_20<-subset(mpdata, id=="open")
+id_20$scaled_new<-id_20$pred_new/max(id_20$pred_new)
+
+id_21<-subset(mpdata, id=="Pineforest")
+id_21$scaled_new<-id_21$pred_new/max(id_21$pred_new)
+
+id_22<-subset(mpdata, id=="Rain1")
+id_22$scaled_new<-id_22$pred_new/max(id_22$pred_new)
+
+id_23<-subset(mpdata, id=="Rain2")
+id_23$scaled_new<-id_23$pred_new/max(id_23$pred_new)
+
+id_24<-subset(mpdata, id=="Range")
+id_24$scaled_new<-id_24$pred_new/max(id_24$pred_new)
+
+id_25<-subset(mpdata, id=="RR")
+id_25$scaled_new<-id_25$pred_new/max(id_25$pred_new)
+
+id_26<-subset(mpdata, id=="RS")
+id_26$scaled_new<-id_26$pred_new/max(id_26$pred_new)
+
+id_27<-subset(mpdata, id=="ST")
+id_27$scaled_new<-id_27$pred_new/max(id_27$pred_new)
+
+id_28<-subset(mpdata, id=="Teak")
+id_28$scaled_new<-id_28$pred_new/max(id_28$pred_new)
+
+id_29<-subset(mpdata, id=="TibetCK")
+id_29$scaled_new<-id_29$pred_new/max(id_29$pred_new)
+
+id_30<-subset(mpdata, id=="TibetW1")
+id_30$scaled_new<-id_30$pred_new/max(id_30$pred_new)
+
+id_31<-subset(mpdata, id=="TibetW2")
+id_31$scaled_new<-id_31$pred_new/max(id_31$pred_new)
+
+id_32<-subset(mpdata, id=="under")
+id_32$scaled_new<-id_32$pred_new/max(id_32$pred_new)
+
+id_33<-subset(mpdata, id=="WythamAd")
+id_33$scaled_new<-id_33$pred_new/max(id_33$pred_new)
+
+id_34<-subset(mpdata, id=="WythamCT")
+id_34$scaled_new<-id_34$pred_new/max(id_34$pred_new)
+
+id_35<-subset(mpdata, id=="WythamRe")
+id_35$scaled_new<-id_35$pred_new/max(id_35$pred_new)
+
+id_36<-subset(mpdata, id=="YL")
+id_36$scaled_new<-id_36$pred_new/max(id_36$pred_new)
+
+
+new_scaled<-rbind(id_1,id_2,id_3,id_4,id_5,id_6,id_7,id_8,id_9,id_10,id_11,id_12,id_13,id_14,id_15,id_16,id_17,id_18,id_19,id_20,
+                  id_21,id_22,id_23,id_24,id_25,id_26,id_27,id_28,id_29,id_30,id_31,id_32,id_33,id_34,id_35,id_36)
+#=====
+newdata$out2_s<-new_scaled$scaled_new
+
+mpdata<-newdata
+colnames(mpdata)[18]<-("pred_new")
+mpdata$scaled_new<-0
+
+#check unique id======
+unique(mpdata$id)
+
+id_1<-subset(mpdata, id=="Bare")
+id_1$scaled_new<-id_1$pred_new/max(id_1$pred_new)
+
+id_2<-subset(mpdata, id=="Cedao")
+id_2$scaled_new<-id_2$pred_new/max(id_2$pred_new)
+
+id_3<-subset(mpdata, id=="Cedo")
+id_3$scaled_new<-id_3$pred_new/max(id_3$pred_new)
+
+id_4<-subset(mpdata, id=="droughtCK")
+id_4$scaled_new<-id_4$pred_new/max(id_4$pred_new)
+
+id_5<-subset(mpdata, id=="droughtPE3")
+id_5$scaled_new<-id_5$pred_new/max(id_5$pred_new)
+
+id_6<-subset(mpdata, id=="droughtPE5")
+id_6$scaled_new<-id_6$pred_new/max(id_6$pred_new)
+
+id_7<-subset(mpdata, id=="droughtPE7")
+id_7$scaled_new<-id_7$pred_new/max(id_7$pred_new)
+
+id_8<-subset(mpdata, id=="Fog1")
+id_8$scaled_new<-id_8$pred_new/max(id_8$pred_new)
+
+id_9<-subset(mpdata, id=="Fog2")
+id_9$scaled_new<-id_9$pred_new/max(id_9$pred_new)
+
+id_10<-subset(mpdata, id=="GE")
+id_10$scaled_new<-id_10$pred_new/max(id_10$pred_new)
+
+id_11<-subset(mpdata, id=="GiganteAd")
+id_11$scaled_new<-id_11$pred_new/max(id_11$pred_new)
+
+id_12<-subset(mpdata, id=="GiganteCT")
+id_12$scaled_new<-id_12$pred_new/max(id_12$pred_new)
+
+id_13<-subset(mpdata, id=="GiganteRe")
+id_13$scaled_new<-id_13$pred_new/max(id_13$pred_new)
+
+id_14<-subset(mpdata, id=="HC")
+id_14$scaled_new<-id_14$pred_new/max(id_14$pred_new)
+
+id_15<-subset(mpdata, id=="LC")
+id_15$scaled_new<-id_15$pred_new/max(id_15$pred_new)
+
+id_16<-subset(mpdata, id=="MC")
+id_16$scaled_new<-id_16$pred_new/max(id_16$pred_new)
+
+id_17<-subset(mpdata, id=="mix")
+id_17$scaled_new<-id_17$pred_new/max(id_17$pred_new)
+
+id_18<-subset(mpdata, id=="OakOA")
+id_18$scaled_new<-id_18$pred_new/max(id_18$pred_new)
+
+id_19<-subset(mpdata, id=="OakUT")
+id_19$scaled_new<-id_19$pred_new/max(id_19$pred_new)
+
+id_20<-subset(mpdata, id=="open")
+id_20$scaled_new<-id_20$pred_new/max(id_20$pred_new)
+
+id_21<-subset(mpdata, id=="Pineforest")
+id_21$scaled_new<-id_21$pred_new/max(id_21$pred_new)
+
+id_22<-subset(mpdata, id=="Rain1")
+id_22$scaled_new<-id_22$pred_new/max(id_22$pred_new)
+
+id_23<-subset(mpdata, id=="Rain2")
+id_23$scaled_new<-id_23$pred_new/max(id_23$pred_new)
+
+id_24<-subset(mpdata, id=="Range")
+id_24$scaled_new<-id_24$pred_new/max(id_24$pred_new)
+
+id_25<-subset(mpdata, id=="RR")
+id_25$scaled_new<-id_25$pred_new/max(id_25$pred_new)
+
+id_26<-subset(mpdata, id=="RS")
+id_26$scaled_new<-id_26$pred_new/max(id_26$pred_new)
+
+id_27<-subset(mpdata, id=="ST")
+id_27$scaled_new<-id_27$pred_new/max(id_27$pred_new)
+
+id_28<-subset(mpdata, id=="Teak")
+id_28$scaled_new<-id_28$pred_new/max(id_28$pred_new)
+
+id_29<-subset(mpdata, id=="TibetCK")
+id_29$scaled_new<-id_29$pred_new/max(id_29$pred_new)
+
+id_30<-subset(mpdata, id=="TibetW1")
+id_30$scaled_new<-id_30$pred_new/max(id_30$pred_new)
+
+id_31<-subset(mpdata, id=="TibetW2")
+id_31$scaled_new<-id_31$pred_new/max(id_31$pred_new)
+
+id_32<-subset(mpdata, id=="under")
+id_32$scaled_new<-id_32$pred_new/max(id_32$pred_new)
+
+id_33<-subset(mpdata, id=="WythamAd")
+id_33$scaled_new<-id_33$pred_new/max(id_33$pred_new)
+
+id_34<-subset(mpdata, id=="WythamCT")
+id_34$scaled_new<-id_34$pred_new/max(id_34$pred_new)
+
+id_35<-subset(mpdata, id=="WythamRe")
+id_35$scaled_new<-id_35$pred_new/max(id_35$pred_new)
+
+id_36<-subset(mpdata, id=="YL")
+id_36$scaled_new<-id_36$pred_new/max(id_36$pred_new)
+
+new_scaled<-rbind(id_1,id_2,id_3,id_4,id_5,id_6,id_7,id_8,id_9,id_10,id_11,id_12,id_13,id_14,id_15,id_16,id_17,id_18,id_19,id_20,
+                  id_21,id_22,id_23,id_24,id_25,id_26,id_27,id_28,id_29,id_30,id_31,id_32,id_33,id_34,id_35,id_36)
+#=====
+newdata$out3_s<-new_scaled$scaled_new
+
+
+
+mpdata<-newdata
+colnames(mpdata)[19]<-("pred_new")
+mpdata$scaled_new<-0
+
+#check unique id======
+unique(mpdata$id)
+
+id_1<-subset(mpdata, id=="Bare")
+id_1$scaled_new<-id_1$pred_new/max(id_1$pred_new)
+
+id_2<-subset(mpdata, id=="Cedao")
+id_2$scaled_new<-id_2$pred_new/max(id_2$pred_new)
+
+id_3<-subset(mpdata, id=="Cedo")
+id_3$scaled_new<-id_3$pred_new/max(id_3$pred_new)
+
+id_4<-subset(mpdata, id=="droughtCK")
+id_4$scaled_new<-id_4$pred_new/max(id_4$pred_new)
+
+id_5<-subset(mpdata, id=="droughtPE3")
+id_5$scaled_new<-id_5$pred_new/max(id_5$pred_new)
+
+id_6<-subset(mpdata, id=="droughtPE5")
+id_6$scaled_new<-id_6$pred_new/max(id_6$pred_new)
+
+id_7<-subset(mpdata, id=="droughtPE7")
+id_7$scaled_new<-id_7$pred_new/max(id_7$pred_new)
+
+id_8<-subset(mpdata, id=="Fog1")
+id_8$scaled_new<-id_8$pred_new/max(id_8$pred_new)
+
+id_9<-subset(mpdata, id=="Fog2")
+id_9$scaled_new<-id_9$pred_new/max(id_9$pred_new)
+
+id_10<-subset(mpdata, id=="GE")
+id_10$scaled_new<-id_10$pred_new/max(id_10$pred_new)
+
+id_11<-subset(mpdata, id=="GiganteAd")
+id_11$scaled_new<-id_11$pred_new/max(id_11$pred_new)
+
+id_12<-subset(mpdata, id=="GiganteCT")
+id_12$scaled_new<-id_12$pred_new/max(id_12$pred_new)
+
+id_13<-subset(mpdata, id=="GiganteRe")
+id_13$scaled_new<-id_13$pred_new/max(id_13$pred_new)
+
+id_14<-subset(mpdata, id=="HC")
+id_14$scaled_new<-id_14$pred_new/max(id_14$pred_new)
+
+id_15<-subset(mpdata, id=="LC")
+id_15$scaled_new<-id_15$pred_new/max(id_15$pred_new)
+
+id_16<-subset(mpdata, id=="MC")
+id_16$scaled_new<-id_16$pred_new/max(id_16$pred_new)
+
+id_17<-subset(mpdata, id=="mix")
+id_17$scaled_new<-id_17$pred_new/max(id_17$pred_new)
+
+id_18<-subset(mpdata, id=="OakOA")
+id_18$scaled_new<-id_18$pred_new/max(id_18$pred_new)
+
+id_19<-subset(mpdata, id=="OakUT")
+id_19$scaled_new<-id_19$pred_new/max(id_19$pred_new)
+
+id_20<-subset(mpdata, id=="open")
+id_20$scaled_new<-id_20$pred_new/max(id_20$pred_new)
+
+id_21<-subset(mpdata, id=="Pineforest")
+id_21$scaled_new<-id_21$pred_new/max(id_21$pred_new)
+
+id_22<-subset(mpdata, id=="Rain1")
+id_22$scaled_new<-id_22$pred_new/max(id_22$pred_new)
+
+id_23<-subset(mpdata, id=="Rain2")
+id_23$scaled_new<-id_23$pred_new/max(id_23$pred_new)
+
+id_24<-subset(mpdata, id=="Range")
+id_24$scaled_new<-id_24$pred_new/max(id_24$pred_new)
+
+id_25<-subset(mpdata, id=="RR")
+id_25$scaled_new<-id_25$pred_new/max(id_25$pred_new)
+
+id_26<-subset(mpdata, id=="RS")
+id_26$scaled_new<-id_26$pred_new/max(id_26$pred_new)
+
+id_27<-subset(mpdata, id=="ST")
+id_27$scaled_new<-id_27$pred_new/max(id_27$pred_new)
+
+id_28<-subset(mpdata, id=="Teak")
+id_28$scaled_new<-id_28$pred_new/max(id_28$pred_new)
+
+id_29<-subset(mpdata, id=="TibetCK")
+id_29$scaled_new<-id_29$pred_new/max(id_29$pred_new)
+
+id_30<-subset(mpdata, id=="TibetW1")
+id_30$scaled_new<-id_30$pred_new/max(id_30$pred_new)
+
+id_31<-subset(mpdata, id=="TibetW2")
+id_31$scaled_new<-id_31$pred_new/max(id_31$pred_new)
+
+id_32<-subset(mpdata, id=="under")
+id_32$scaled_new<-id_32$pred_new/max(id_32$pred_new)
+
+id_33<-subset(mpdata, id=="WythamAd")
+id_33$scaled_new<-id_33$pred_new/max(id_33$pred_new)
+
+id_34<-subset(mpdata, id=="WythamCT")
+id_34$scaled_new<-id_34$pred_new/max(id_34$pred_new)
+
+id_35<-subset(mpdata, id=="WythamRe")
+id_35$scaled_new<-id_35$pred_new/max(id_35$pred_new)
+
+id_36<-subset(mpdata, id=="YL")
+id_36$scaled_new<-id_36$pred_new/max(id_36$pred_new)
+
+new_scaled<-rbind(id_1,id_2,id_3,id_4,id_5,id_6,id_7,id_8,id_9,id_10,id_11,id_12,id_13,id_14,id_15,id_16,id_17,id_18,id_19,id_20,
+                  id_21,id_22,id_23,id_24,id_25,id_26,id_27,id_28,id_29,id_30,id_31,id_32,id_33,id_34,id_35,id_36)
+#=====
+newdata$out4_s<-new_scaled$scaled_new
+
+
+mpdata<-newdata
+colnames(mpdata)[20]<-("pred_new")
+mpdata$scaled_new<-0
+
+#check unique id======
+unique(mpdata$id)
+
+id_1<-subset(mpdata, id=="Bare")
+id_1$scaled_new<-id_1$pred_new/max(id_1$pred_new)
+
+id_2<-subset(mpdata, id=="Cedao")
+id_2$scaled_new<-id_2$pred_new/max(id_2$pred_new)
+
+id_3<-subset(mpdata, id=="Cedo")
+id_3$scaled_new<-id_3$pred_new/max(id_3$pred_new)
+
+id_4<-subset(mpdata, id=="droughtCK")
+id_4$scaled_new<-id_4$pred_new/max(id_4$pred_new)
+
+id_5<-subset(mpdata, id=="droughtPE3")
+id_5$scaled_new<-id_5$pred_new/max(id_5$pred_new)
+
+id_6<-subset(mpdata, id=="droughtPE5")
+id_6$scaled_new<-id_6$pred_new/max(id_6$pred_new)
+
+id_7<-subset(mpdata, id=="droughtPE7")
+id_7$scaled_new<-id_7$pred_new/max(id_7$pred_new)
+
+id_8<-subset(mpdata, id=="Fog1")
+id_8$scaled_new<-id_8$pred_new/max(id_8$pred_new)
+
+id_9<-subset(mpdata, id=="Fog2")
+id_9$scaled_new<-id_9$pred_new/max(id_9$pred_new)
+
+id_10<-subset(mpdata, id=="GE")
+id_10$scaled_new<-id_10$pred_new/max(id_10$pred_new)
+
+id_11<-subset(mpdata, id=="GiganteAd")
+id_11$scaled_new<-id_11$pred_new/max(id_11$pred_new)
+
+id_12<-subset(mpdata, id=="GiganteCT")
+id_12$scaled_new<-id_12$pred_new/max(id_12$pred_new)
+
+id_13<-subset(mpdata, id=="GiganteRe")
+id_13$scaled_new<-id_13$pred_new/max(id_13$pred_new)
+
+id_14<-subset(mpdata, id=="HC")
+id_14$scaled_new<-id_14$pred_new/max(id_14$pred_new)
+
+id_15<-subset(mpdata, id=="LC")
+id_15$scaled_new<-id_15$pred_new/max(id_15$pred_new)
+
+id_16<-subset(mpdata, id=="MC")
+id_16$scaled_new<-id_16$pred_new/max(id_16$pred_new)
+
+id_17<-subset(mpdata, id=="mix")
+id_17$scaled_new<-id_17$pred_new/max(id_17$pred_new)
+
+id_18<-subset(mpdata, id=="OakOA")
+id_18$scaled_new<-id_18$pred_new/max(id_18$pred_new)
+
+id_19<-subset(mpdata, id=="OakUT")
+id_19$scaled_new<-id_19$pred_new/max(id_19$pred_new)
+
+id_20<-subset(mpdata, id=="open")
+id_20$scaled_new<-id_20$pred_new/max(id_20$pred_new)
+
+id_21<-subset(mpdata, id=="Pineforest")
+id_21$scaled_new<-id_21$pred_new/max(id_21$pred_new)
+
+id_22<-subset(mpdata, id=="Rain1")
+id_22$scaled_new<-id_22$pred_new/max(id_22$pred_new)
+
+id_23<-subset(mpdata, id=="Rain2")
+id_23$scaled_new<-id_23$pred_new/max(id_23$pred_new)
+
+id_24<-subset(mpdata, id=="Range")
+id_24$scaled_new<-id_24$pred_new/max(id_24$pred_new)
+
+id_25<-subset(mpdata, id=="RR")
+id_25$scaled_new<-id_25$pred_new/max(id_25$pred_new)
+
+id_26<-subset(mpdata, id=="RS")
+id_26$scaled_new<-id_26$pred_new/max(id_26$pred_new)
+
+id_27<-subset(mpdata, id=="ST")
+id_27$scaled_new<-id_27$pred_new/max(id_27$pred_new)
+
+id_28<-subset(mpdata, id=="Teak")
+id_28$scaled_new<-id_28$pred_new/max(id_28$pred_new)
+
+id_29<-subset(mpdata, id=="TibetCK")
+id_29$scaled_new<-id_29$pred_new/max(id_29$pred_new)
+
+id_30<-subset(mpdata, id=="TibetW1")
+id_30$scaled_new<-id_30$pred_new/max(id_30$pred_new)
+
+id_31<-subset(mpdata, id=="TibetW2")
+id_31$scaled_new<-id_31$pred_new/max(id_31$pred_new)
+
+id_32<-subset(mpdata, id=="under")
+id_32$scaled_new<-id_32$pred_new/max(id_32$pred_new)
+
+id_33<-subset(mpdata, id=="WythamAd")
+id_33$scaled_new<-id_33$pred_new/max(id_33$pred_new)
+
+id_34<-subset(mpdata, id=="WythamCT")
+id_34$scaled_new<-id_34$pred_new/max(id_34$pred_new)
+
+id_35<-subset(mpdata, id=="WythamRe")
+id_35$scaled_new<-id_35$pred_new/max(id_35$pred_new)
+
+id_36<-subset(mpdata, id=="YL")
+id_36$scaled_new<-id_36$pred_new/max(id_36$pred_new)
+
+new_scaled<-rbind(id_1,id_2,id_3,id_4,id_5,id_6,id_7,id_8,id_9,id_10,id_11,id_12,id_13,id_14,id_15,id_16,id_17,id_18,id_19,id_20,
+                  id_21,id_22,id_23,id_24,id_25,id_26,id_27,id_28,id_29,id_30,id_31,id_32,id_33,id_34,id_35,id_36)
+#=====
+newdata$out5_s<-new_scaled$scaled_new
+
+```
+
+```{r plot}
+testplot<-data.frame(RS=newdata$rs)
+testplot$Obv<-newdata$ra
+testplot$Emp<-newdata$out1
+#testplot$Physiology<-newdata$out2_s
+testplot$Lin<-newdata$out3_s
+testplot$MMK<-newdata$out4_s
+testplot$MMK_eff<-newdata$out5_s
+#create matrix plot
+panel.hist <- function(x, ...) {
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1) )
+  h <- hist(x, breaks=20,plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, ...)
+}
+
+#reg <- function(x, y, col) abline(lm(y~x), col=col) 
+
+panel.lm =  function (x, y, col = par("col"), bg = NA, pch = par("pch"), 
+    cex = 1, col.smooth = "black", span = 2/3, iter = 3, ...)  {
+    points(x, y, pch = pch, col = col, bg = bg, cex = cex)
+    ok <- is.finite(x) & is.finite(y)
+    if (any(ok)) reg(x[ok], y[ok], col.smooth)
+}
+
+pairs(testplot, pch = 19,  cex = 0.5, col=c("#b35806"),diag.panel=NULL,
+      upper.panel=NULL)
+
+dev.print(pdf,        # copies the plot to a the PDF file
+          "Corr_matrix3.pdf",width=7, height=5.8)     
+
+```
+```{r gradient}
+
+testplot<-data.frame(rs=newdata$rs)
+testplot$id<-newdata$id
+testplot$Obv<-newdata$ra
+testplot$Emp<-newdata$out1
+#testplot$Physiology<-newdata$out2_s
+testplot$Lin<-newdata$out3_s
+testplot$MMK<-newdata$out4_s
+testplot$MMK_eff<-newdata$out5_s
+testplot$clay<-newdata$clay
+
+
+#plot observations along clay and soc gradient
+plot1<-ggplot(testplot, aes(x = rs,y = MMK_eff, group = id)) +
+  scale_x_continuous(name = expression(paste("Relative saturation")),limits = c(0,1)) +
+  scale_y_continuous(name = 'Relative activity ',limits = c(0,1)) +
+  geom_line(aes(color=clay),size=1.6, shape=1,stroke=1)+theme_bw()+
+  scale_color_gradientn(colors=c("#b35806", "#fee0b6", "#542788"), values=c(0,1))+theme(text = element_text(size=16)) 
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))#co
+plot2
+#pdf("field_mmk_clay.pdf", width=5.5, height=4)
+#plot2
+#dev.off() 
+```
+
+##result statistics and visualization
+```{r visual}
+
+ptest<-data.frame(rs=newdata$rs) 
+ptest$res<-newdata$out4_s-newdata$ra
+
+ave<-mean(newdata$ra)
+ssres<-sum(ptest$res^2)
+sstot<-sum((newdata$ra-ave)^2)  
+RR<-1-ssres/sstot
+RSME<-(ssres^2/length(newdata$ra))^1/2
+paste0("R-square = ", RR) #print R-square value
+
+paste0("RSME = ", RSME)
+
+
+simple.fit = lm(res~rs, data=ptest)
+summary(simple.fit)
+
+
+#residual plot
+plot1<-ggplot(ptest, aes(x = rs,y = res)) +
+  scale_x_continuous(name = expression(paste("Relative saturation")),limits = c(0,1)) +
+  scale_y_continuous(name = 'Residual',limits = c(-1,1))+geom_point(col="#642ba6", pch=1 , cex=1.6)+geom_hline(yintercept=0, color="black", linetype="dashed",size=0.5)+
+  geom_smooth(method=lm, color="tomato1", size=1, fill="tomato1", se=TRUE)
+
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+```
+
+
+```{r line}
+
+
+ptest<-data.frame(ra=newdata$ra) 
+
+
+#ptest$lin<-newdata$out3_s
+ptest$mmk<-newdata$out4_s
+ptest$emp<-newdata$out1/0.73
+pdiff<-reshape2::melt(ptest, id.vars=("ra"))
+summary(pdiff)
+x<-ptest$ra
+y<-ptest$mmk
+fit1<-lm(y~x)
+summary(fit1)
+  
+plot1<-ggplot(pdiff, aes(x=ra, y=value))+geom_point(aes(color=variable),cex=1.2,shape=1, alpha=0.9)+
+    geom_smooth(aes(color=variable, fill=variable),method = lm, se = TRUE, size=1)+
+    geom_abline(slope=1,intercept=0, color="black",linetype="dashed",size=0.6)+
+    scale_color_manual(values = c("#b35806","#8073ac","#7f3b08"))+
+    scale_fill_manual(values = c("#b35806","#8073ac","#7f3b08"))+
+    scale_x_continuous(name = 'Observation',limits = c(0,1))+
+    scale_y_continuous(name = 'Prediction',limits = c(0,1))+
+    theme(text = element_text(size=16)) 
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+#pdf("field_pred_size1.pdf", width=5, height=3.5)
+#plot2
+#dev.off() 
+
+```
+
+
+#residual plot
+```{r line}
+
+
+ptest<-data.frame(ra=newdata$ra) 
+
+ptest$mmk<-newdata$out4_s
+#ptest$lin<-newdata$out3_s
+ptest$lin<-newdata$out3_s
+pdiff<-reshape2::melt(ptest, id.vars=("ra"))
+summary(pdiff)
+x<-ptest$ra
+y<-ptest$lin
+fit1<-lm(y~x)
+summary(fit1)
+  
+plot1<-ggplot(pdiff, aes(x=ra, y=value))+geom_point(aes(color=variable),cex=1,shape=1, alpha=0.9)+
+    geom_smooth(aes(color=variable, fill=variable),method = lm, se = TRUE, size=1)+
+    geom_abline(slope=1,intercept=0, color="black",linetype="dashed",size=0.6)+
+    scale_color_manual(values = c("#b35806","#fdb863","#7f3b08"))+
+    scale_fill_manual(values =c("#b35806","#fdb863","#7f3b08"))+
+    scale_x_continuous(name = 'Observation',limits = c(0,1))+
+    scale_y_continuous(name = 'Prediction',limits = c(0,1))+
+    theme(text = element_text(size=16)) 
+plot2<-plot1+theme_linedraw()+theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+theme(text = element_text(size=16))
+print(plot2)
+
+pdf("field_pred_new2.pdf", width=5.5, height=4)
+plot2
+dev.off() 
+
+```
