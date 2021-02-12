@@ -4,7 +4,7 @@ This repository is archived for manuscript **" a trait-based approach to address
 
 * Folder--Diffusion_nonlinear_analysis
 
-   * This folder contains the R script used fo rdiffusion based nonliear kinetics analysis within a model system. Sensitivity analysis and graph generation are also included.
+   * This folder contains the R script used fo diffusion based nonliear kinetics analysis within a model system. Sensitivity analysis and graph generation are also included.
 
 * Folder--Dataset_mmk_analysis
 
